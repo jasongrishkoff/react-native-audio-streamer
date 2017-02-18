@@ -4,6 +4,9 @@ import android.os.Handler;
 import android.util.Log;
 import android.os.Build;
 import android.net.Uri;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.Context;
 
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
@@ -39,6 +42,10 @@ import java.util.List;
 
 import com.danikula.videocache.HttpProxyCacheServer;
 
+// Phone and becoming noisy
+import android.content.BroadcastReceiver;
+
+
 public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements ExoPlayer.EventListener, ExtractorMediaSource.EventListener{
 
     private static final String TAG = "RNAS/Module";
@@ -46,7 +53,7 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
     // Player
     private SimpleExoPlayer player = null;
     private String status = "STOPPED";
-    private ReactApplicationContext reactContext = null;
+    static private ReactApplicationContext reactContext = null;
 
     // AudioFocus
     private boolean mHasAudioFocus = false;
@@ -70,6 +77,9 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
     private static final String FINISHED = "FINISHED";
     private static final String BUFFERING = "BUFFERING";
     private static final String ERROR = "ERROR";
+
+    // Avoid "next" firing twice before playing
+    static private boolean fired_next = false;
 
     // Module Name
     @Override public String getName() {
@@ -119,9 +129,9 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
 
     @ReactMethod public void setUrl(String urlString) {
 
-        if (player != null){
+        if (player != null) {
             player.stop();
-            changeAudioFocus(false);
+            //changeAudioFocus(false);
             player = null;
             status = "STOPPED";
             this.sendStatusEvent();
@@ -147,14 +157,28 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
         player.prepare(audioSource);
         player.addListener(this);
         changeAudioFocus(true);
+
+        // Broadcast and Call listeners
+        registerBecomingNoisyReceiver();
     }
 
     @ReactMethod public void play() {
         if(player != null) player.setPlayWhenReady(true);
+        fired_next = false;
     }
 
     @ReactMethod public void pause() {
         if(player != null) player.setPlayWhenReady(false);
+    }
+
+    @ReactMethod static public void nextSong() {
+        if (!fired_next) {
+            fired_next = true;
+            // Fire the background task..
+            Intent serviceIntent = new Intent(reactContext, NotificationService.class);
+            serviceIntent.setAction("ACTION_NEXT");
+            reactContext.startService(serviceIntent);
+        }
     }
 
     @ReactMethod public void seekToTime(double time) {
@@ -196,7 +220,7 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
         switch (playbackState) {
             case ExoPlayer.STATE_IDLE:
                 status = STOPPED;
-                changeAudioFocus(false);
+                //changeAudioFocus(false);
                 this.sendStatusEvent();
                 break;
             case ExoPlayer.STATE_BUFFERING:
@@ -216,7 +240,8 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
             case ExoPlayer.STATE_ENDED:
                 status = FINISHED;
                 this.sendStatusEvent();
-                changeAudioFocus(false);
+                this.nextSong();
+                //changeAudioFocus(false);
                 break;
         }
     }
@@ -237,7 +262,7 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
         if (isLoading == true){
             status = BUFFERING;
             this.sendStatusEvent();
-        }else if (this.player != null){
+        } else if (this.player != null){
             if (this.player.getPlayWhenReady()) {
                 status = PLAYING;
                 this.sendStatusEvent();
@@ -254,6 +279,18 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
 
     @Override
     public void onLoadError(IOException error) {
+        try {
+            boolean isOnline = NetworkHelper.isOnline(reactContext);
+            if (isOnline) {
+                Thread.sleep(5000);
+                this.nextSong();
+            } else {
+                Thread.sleep(10000);
+                if (player != null) player.setPlayWhenReady(true);
+            }
+        } catch(InterruptedException e) {
+            e.printStackTrace();
+        }
         status = ERROR;
         this.sendStatusEvent();
     }
@@ -360,6 +397,28 @@ public class RNAudioStreamerModule extends ReactContextBaseJavaModule implements
                 mHasAudioFocus = false;
             }
         }
+    }
+
+    /**
+     * ACTION_AUDIO_BECOMING_NOISY -- change in audio outputs
+     */
+    private BroadcastReceiver becomingNoisyReceiver = new BroadcastReceiver() {
+        //@Override
+        public void onReceive(Context context, Intent intent) {
+            // Pause audio on ACTION_AUDIO_BECOMING_NOISY
+            Log.e("RNAudioReceiver","Paused");
+            pause();
+            // Fire the background task..
+            Intent serviceIntent = new Intent(reactContext, NotificationService.class);
+            serviceIntent.setAction("UNPLUGGED");
+            reactContext.startService(serviceIntent);
+        }
+    };
+
+    private void registerBecomingNoisyReceiver() {
+        // Register after getting audio focus
+        IntentFilter intentFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        reactContext.registerReceiver(becomingNoisyReceiver, intentFilter);
     }
 
 }
